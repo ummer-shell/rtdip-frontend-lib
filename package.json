@@ -1,0 +1,25 @@
+{
+  "name": "rtdip-frontend-lib",
+  "version": "1.0.0",
+  "description": "A frontend library to request and process realtime data from databricks tables via the official rest api.",
+  "main": "index.js",
+  "scripts": {
+    "test": "npm run test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ummer-shell/rtdip-frontend-lib.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/ummer-shell/rtdip-frontend-lib/issues"
+  },
+  "homepage": "https://github.com/ummer-shell/rtdip-frontend-lib#readme",
+  "dependencies": {
+    "axios": "^1.5.1",
+    "moment": "^2.29.4",
+    "moment-timezone": "^0.5.43",
+    "nunjucks": "^3.2.4"
+  }
+}
