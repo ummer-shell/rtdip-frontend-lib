@@ -12,6 +12,7 @@ env.addFilter('joinWithQuotes', function(arr, delimiter = ', ') {
 const TIMESTAMP_FORMAT = "YYYY-MM-DDTHH:mm:ssZ"
 const seconds_per_unit = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
+
 export function timeWeightedAverage(parameters) {
     parameters = _parse_dates(parameters)
     parameters["range_join_seconds"] = _convert_to_seconds(
@@ -27,8 +28,6 @@ export function timeWeightedAverage(parameters) {
     parameters["end_datetime"] = 
     moment(parameters.end_date, TIMESTAMP_FORMAT)
     .format("YYYY-MM-DDTHH:mm:ss");
-
-    console.log(parameters)
 
     let timeWeightedAverageQuery = `
         WITH raw_events AS (SELECT DISTINCT \`{{ tagname_column }}\`, from_utc_timestamp(to_timestamp(date_format(\`{{ timestamp_column }}\`, 'yyyy-MM-dd HH:mm:ss.SSS')), \"{{ time_zone }}\") AS \`{{ timestamp_column }}\`, {%if include_status and include_status == True %} \`{{ status_column }}\`, {% else %} 'Good' AS \`Status\`, {% endif %} \`{{ value_column }}\` FROM
@@ -112,6 +111,54 @@ export function timeWeightedAverage(parameters) {
     return env.renderString(timeWeightedAverageQuery, timeWeightedAverageParameters)
 }
 
+
+export function raw(parameters){
+
+    parameters = _parse_dates(parameters)
+
+    let rawQuery = `
+        SELECT DISTINCT from_utc_timestamp(to_timestamp(date_format(\`{{ timestamp_column }}\`, 'yyyy-MM-dd HH:mm:ss.SSS')), \"{{ time_zone }}\") AS \`{{ timestamp_column }}\`, \`{{ tagname_column }}\`, {% if include_status is defined and include_status == true %} \`{{ status_column }}\`, {% endif %} \`{{ value_column }}\` FROM 
+        {% if source is defined and source is not none %}
+        {{ source|lower }} 
+        {% else %}
+        \`{{ business_unit|lower }}\`.\`sensors\`.\`{{ asset|lower }}_{{ data_security_level|lower }}_events_{{ data_type|lower }}\` 
+        {% endif %}
+        WHERE \`{{ timestamp_column }}\` BETWEEN to_timestamp(\"{{ start_date }}\") AND to_timestamp(\"{{ end_date }}\") AND \`{{ tagname_column }}\` IN ({{ tag_names | joinWithQuotes }}) 
+        {% if include_status is defined and include_status == true and include_bad_data is defined and include_bad_data == false %}
+        AND \`{{ status_column }}\` = 'Good'
+        {% endif %}
+        ORDER BY \`{{ tagname_column }}\`, \`{{ timestamp_column }}\` 
+        {% if limit is defined and limit is not none %}
+        LIMIT {{ limit }} 
+        {% endif %}
+        {% if offset is defined and offset is not none %}
+        OFFSET {{ offset }} 
+        {% endif %}
+    `
+
+    const rawParameters = {
+        "source":               parameters["source"],
+        "source_metadata":      parameters["source_metadata"],
+        "business_unit":        parameters["business_unit"],
+        "region":               parameters["region"],
+        "asset":                parameters["asset"],
+        "data_security_level":  parameters["data_security_level"],
+        "data_type":            parameters["data_type"],
+        "start_date":           parameters["start_date"],
+        "end_date":             parameters["end_date"],
+        "tag_names":            [...new Set(parameters["tag_names"])],
+        "include_bad_data":     parameters["include_bad_data"],
+        "limit":                parameters["limit"],
+        "offset":               parameters["offset"],
+        "tagname_column":       get(parameters, "tagname_column", "TagName"),
+        "timestamp_column":     get(parameters, "timestamp_column", "EventTime"),
+        "include_status":       "status_column" in parameters && parameters["status_column"] ? false : true,
+        "status_column":        "status_column" in parameters && parameters["status_column"] ? "Status" : get(parameters, "status_column", "Status"),
+        "value_column":         get(parameters, "value_column", "Value")
+    }
+
+    return env.renderString(rawQuery, rawParameters)
+}
 
 // utils
 const get = (obj, key, defaultValue=undefined) => {
