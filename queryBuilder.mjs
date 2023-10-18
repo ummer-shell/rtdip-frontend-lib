@@ -275,6 +275,104 @@ export function resample(parameters){
 
 
 
+export function interpolate(parameters){
+
+    parameters = _parse_dates(parameters)
+    parameters["range_join_seconds"] = _convert_to_seconds(
+        parameters["time_interval_rate"]
+        + " "
+        + parameters["time_interval_unit"][0]
+    )
+
+    const interpolateParameters = {
+        "source":               parameters["source"],
+        "source_metadata":      parameters["source_metadata"],
+        "business_unit":        parameters["business_unit"],
+        "region":               parameters["region"],
+        "asset":                parameters["asset"],
+        "data_security_level":  parameters["data_security_level"],
+        "data_type":            parameters["data_type"],
+        "start_date":           parameters["start_date"],
+        "end_date":             parameters["end_date"],
+        "tag_names":            [...new Set(parameters["tag_names"])],
+        "include_bad_data":     parameters["include_bad_data"],
+        "time_interval_rate":   parameters["time_interval_rate"],
+        "time_interval_unit":   parameters["time_interval_unit"],
+        "agg_method":           get(parameters, "agg_method", "first"),
+        "interpolation_method": parameters["interpolation_method"], 
+        "time_zone":            parameters["time_zone"],
+        "pivot":                parameters["pivot"],
+        "limit":                parameters["limit"],
+        "offset":               parameters["offset"],
+        "is_resample":          true,
+        "tagname_column":       get(parameters, "tagname_column", "TagName"),
+        "timestamp_column":     get(parameters, "timestamp_column", "EventTime"),
+        "include_status":       "status_column" in parameters && parameters["status_column"] ? false : true,
+        "status_column":        "status_column" in parameters && parameters["status_column"] ? "Status" : get(parameters, "status_column", "Status"),
+        "value_column":         get(parameters, "value_column", "Value"),
+        "range_join_seconds":   parameters["range_join_seconds"]
+    }
+
+    if(parameters["interpolation_method"] == "forward_fill"){
+        var interpolationMethods = "last_value/UNBOUNDED PRECEDING/CURRENT ROW"
+    }
+    
+    if(parameters["interpolation_method"] == "backward_fill"){
+        var interpolationMethods = "first_value/CURRENT ROW/UNBOUNDED FOLLOWING"
+    }
+    
+    if (parameters["interpolation_method"] == "forward_fill" || parameters["interpolation_method"] == "backward_fill"){
+        var interpolationOptions = interpolationMethods.split("/")
+    }
+
+    interpolateParameters["interpolation_method"] = parameters["interpolation_method"]
+    if (parameters["interpolation_method"] == "forward_fill" || parameters["interpolation_method"] == "backward_fill"){
+        interpolateParameters["interpolation_options_0"] = interpolationOptions[0]
+        interpolateParameters["interpolation_options_1"] = interpolationOptions[1]
+        interpolateParameters["interpolation_options_2"] = interpolationOptions[2]
+    }
+
+    // Generate resample query first as the basis of interpolate query
+    interpolateParameters["pivot"] = false // make sure to not pivot with initial query
+    const resampleQuery = resample(interpolateParameters)
+
+    // reset parameters after initial resample starter query 
+    interpolateParameters["is_resample"] = false
+    interpolateParameters["pivot"] = parameters["pivot"]
+
+    // Additional part of the interpolate query, which builds on the resample
+    let interpolateQuery = `
+        WITH resample AS (${resampleQuery})
+        ,date_array AS (SELECT explode(sequence(from_utc_timestamp(to_timestamp(\"{{ start_date }}\"), \"{{ time_zone }}\"), from_utc_timestamp(to_timestamp(\"{{ end_date }}\"), \"{{ time_zone }}\"), INTERVAL '{{ time_interval_rate + ' ' + time_interval_unit }}')) AS \`{{ timestamp_column }}\`, explode(array({{ tag_names | joinWithQuotes }})) AS \`{{ tagname_column }}\`) 
+        {% if (interpolation_method is defined) and (interpolation_method == "forward_fill" or interpolation_method == "backward_fill") %}
+        ,project AS (SELECT a.\`{{ timestamp_column }}\`, a.\`{{ tagname_column }}\`, {{ interpolation_options_0 }}(b.\`{{ value_column }}\`, true) OVER (PARTITION BY a.\`{{ tagname_column }}\` ORDER BY a.\`{{ timestamp_column }}\` ROWS BETWEEN {{ interpolation_options_1 }} AND {{ interpolation_options_2 }}) AS \`{{ value_column }}\` FROM date_array a LEFT OUTER JOIN resample b ON a.\`{{ timestamp_column }}\` = b.\`{{ timestamp_column }}\` AND a.\`{{ tagname_column }}\` = b.\`{{ tagname_column }}\`) 
+        {% elif (interpolation_method is defined) and (interpolation_method == "linear") %}
+        ,linear_interpolation_calculations AS (SELECT coalesce(a.\`{{ tagname_column }}\`, b.\`{{ tagname_column }}\`) AS \`{{ tagname_column }}\`, coalesce(a.\`{{ timestamp_column }}\`, b.\`{{ timestamp_column }}\`) AS \`{{ timestamp_column }}\`, a.\`{{ timestamp_column }}\` AS \`Requested_{{ timestamp_column }}\`, b.\`{{ timestamp_column }}\` AS \`Found_{{ timestamp_column }}\`, b.\`{{ value_column }}\`, 
+        last_value(b.\`{{ timestamp_column }}\`, true) OVER (PARTITION BY a.\`{{ tagname_column }}\` ORDER BY a.\`{{ timestamp_column }}\` ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS \`Last_{{ timestamp_column }}\`, last_value(b.\`{{ value_column }}\`, true) OVER (PARTITION BY a.\`{{ tagname_column }}\` ORDER BY a.\`{{ timestamp_column }}\` ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS \`Last_{{ value_column }}\`, 
+        first_value(b.\`{{ timestamp_column }}\`, true) OVER (PARTITION BY a.\`{{ tagname_column }}\` ORDER BY a.\`{{ timestamp_column }}\` ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS \`Next_{{ timestamp_column }}\`, first_value(b.\`{{ value_column }}\`, true) OVER (PARTITION BY a.\`{{ tagname_column }}\` ORDER BY a.\`{{ timestamp_column }}\` ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS \`Next_{{ value_column }}\`, 
+        CASE WHEN b.\`{{ value_column }}\` is NULL THEN \`Last_{{ value_column }}\` + (unix_timestamp(a.\`{{ timestamp_column }}\`) - unix_timestamp(\`Last_{{ timestamp_column }}\`)) * ((\`Next_{{ value_column }}\` - \`Last_{{ value_column }}\`)) / ((unix_timestamp(\`Next_{{ timestamp_column }}\`) - unix_timestamp(\`Last_{{ timestamp_column }}\`))) ELSE b.\`{{ value_column }}\` END AS \`linear_interpolated_{{ value_column }}\` FROM date_array a FULL OUTER JOIN resample b ON a.\`{{ timestamp_column }}\` = b.\`{{ timestamp_column }}\` AND a.\`{{ tagname_column }}\` = b.\`{{ tagname_column }}\`) 
+        ,project AS (SELECT \`{{ timestamp_column }}\`, \`{{ tagname_column }}\`, \`linear_interpolated_{{ value_column }}\` AS \`{{ value_column }}\` FROM linear_interpolation_calculations) 
+        {% else %}
+        ,project AS (SELECT * FROM resample) 
+        {% endif %}
+        {% if pivot is defined and pivot == true %}
+        ,pivot AS (SELECT * FROM project PIVOT (FIRST(\`{{ value_column }}\`) FOR \`{{ tagname_column }}\` IN ({{ tag_names | joinWithQuotes }}))) 
+        SELECT * FROM pivot ORDER BY \`{{ timestamp_column }}\` 
+        {% else %}
+        SELECT * FROM project ORDER BY \`{{ tagname_column }}\`, \`{{ timestamp_column }}\` 
+        {% endif %}
+        {% if limit is defined and limit is not none %}
+        LIMIT {{ limit }} 
+        {% endif %}
+        {% if offset is defined and offset is not none %}
+        OFFSET {{ offset }} 
+        {% endif %}
+    `
+
+    return env.renderString(interpolateQuery, interpolateParameters)
+}
+
+
 // utils
 const get = (obj, key, defaultValue=undefined) => {
     return obj.hasOwnProperty(key) ? obj[key] : defaultValue;
