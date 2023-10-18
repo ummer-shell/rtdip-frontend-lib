@@ -160,6 +160,47 @@ export function raw(parameters){
     return env.renderString(rawQuery, rawParameters)
 }
 
+
+export function latest(parameters){
+
+    parameters = _parse_dates(parameters)
+
+    let latestQuery = `
+        SELECT * FROM 
+        {% if source is defined and source is not none %}
+        {{ source|lower }}
+        {% else %}
+        \`{{ business_unit|lower }}\`.\`sensors\`.\`{{ asset|lower }}_{{ data_security_level|lower }}_events_latest\` 
+        {% endif %}
+        {% if tag_names is defined and tag_names|length > 0 %} 
+        WHERE \`{{ tagname_column }}\` IN ({{ tag_names | joinWithQuotes }}) 
+        {% endif %}
+        ORDER BY \`{{ tagname_column }}\` 
+        {% if limit is defined and limit is not none %}
+        LIMIT {{ limit }} 
+        {% endif %}
+        {% if offset is defined and offset is not none %}
+        OFFSET {{ offset }} 
+        {% endif %}
+    `
+
+    const latestParameters = {
+        "source":               parameters["source"],
+        "source_metadata":      parameters["source_metadata"],
+        "business_unit":        parameters["business_unit"],
+        "region":               parameters["region"],
+        "asset":                parameters["asset"],
+        "data_security_level":  parameters["data_security_level"],
+        "tag_names":            [...new Set(parameters["tag_names"])],
+        "limit":                get(parameters, "limit", 1),
+        "offset":               get(parameters, "offset", 0),
+        "tagname_column":       get(parameters, "tagname_column", "TagName")
+    }
+
+    return env.renderString(latestQuery, latestParameters)
+}
+
+
 // utils
 const get = (obj, key, defaultValue=undefined) => {
     return obj.hasOwnProperty(key) ? obj[key] : defaultValue;
