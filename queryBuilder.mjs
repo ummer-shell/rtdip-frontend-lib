@@ -147,6 +147,7 @@ export function raw(parameters){
         "start_date":           parameters["start_date"],
         "end_date":             parameters["end_date"],
         "tag_names":            [...new Set(parameters["tag_names"])],
+        "time_zone":            parameters["time_zone"],
         "include_bad_data":     parameters["include_bad_data"],
         "limit":                parameters["limit"],
         "offset":               parameters["offset"],
@@ -157,6 +158,7 @@ export function raw(parameters){
         "value_column":         get(parameters, "value_column", "Value")
     }
 
+    console.log(rawParameters)
     return env.renderString(rawQuery, rawParameters)
 }
 
@@ -373,6 +375,88 @@ export function interpolate(parameters){
 }
 
 
+
+export function interpolationAtTime(parameters){
+
+    // parse times and remove duplicates
+    parameters = _parse_dates(parameters)
+    parameters["timestamps"] = [...new Set(parameters["timestamps"])]
+    console.log(parameters["timestamps"])
+    parameters["min_timestamp"] = new Date(Math.min(...parameters["timestamps"].map(dateStr => new Date(dateStr)))).toISOString()
+    parameters["max_timestamp"] = new Date(Math.max(...parameters["timestamps"].map(dateStr => new Date(dateStr)))).toISOString() 
+
+    let interpolationAtTimeQuery = `
+        WITH raw_events AS (SELECT DISTINCT from_utc_timestamp(to_timestamp(date_format(\`{{ timestamp_column }}\`, 'yyyy-MM-dd HH:mm:ss.SSS')), \"{{ time_zone }}\") AS \`{{ timestamp_column }}\`, \`{{ tagname_column }}\`, {% if include_status is defined and include_status == true %} \`{{ status_column }}\`, {% else %} 'Good' AS \`Status\`, {% endif %} \`{{ value_column }}\` FROM 
+        {% if source is defined and source is not none %}
+        {{ source|lower }} 
+        {% else %}
+        \`{{ business_unit|lower }}\`.\`sensors\`.\`{{ asset|lower }}_{{ data_security_level|lower }}_events_{{ data_type|lower }}\` 
+        {% endif %}
+        WHERE to_date(\`{{ timestamp_column }}\`) BETWEEN 
+        {% if timestamps is defined %} 
+        date_sub(to_date(to_timestamp("{{ min_timestamp }}")), {{ window_length }}) AND date_add(to_date(to_timestamp("{{ max_timestamp }}")), {{ window_length}})
+        {% endif %} AND \`{{ tagname_column }}\` IN ({{ tag_names | joinWithQuotes }}) 
+        {% if include_status is defined and include_status == true and include_bad_data is defined and include_bad_data == false %} AND \`{{ status_column }}\` = 'Good' {% endif %}) 
+        , date_array AS (SELECT explode(array( 
+        {% for timestamp in timestamps -%} 
+        from_utc_timestamp(to_timestamp("{{timestamp}}"), "{{time_zone}}") 
+        {% if not loop.last %} , {% endif %} {% endfor %} )) AS \`{{ timestamp_column }}\`, 
+        explode(array({{ tag_names | joinWithQuotes }})) AS \`{{ tagname_column }}\`) 
+        , interpolation_events AS (SELECT coalesce(a.\`{{ tagname_column }}\`, b.\`{{ tagname_column }}\`) AS \`{{ tagname_column }}\`, coalesce(a.\`{{ timestamp_column }}\`, b.\`{{ timestamp_column }}\`) AS \`{{ timestamp_column }}\`, a.\`{{ timestamp_column }}\` AS \`Requested_{{ timestamp_column }}\`, b.\`{{ timestamp_column }}\` AS \`Found_{{ timestamp_column }}\`, b.\`{{ status_column }}\`, b.\`{{ value_column }}\` FROM date_array a FULL OUTER JOIN  raw_events b ON a.\`{{ timestamp_column }}\` = b.\`{{ timestamp_column }}\` AND a.\`{{ tagname_column }}\` = b.\`{{ tagname_column }}\`) 
+        , interpolation_calculations AS (SELECT *, lag(\`{{ timestamp_column }}\`) OVER (PARTITION BY \`{{ tagname_column }}\` ORDER BY \`{{ timestamp_column }}\`) AS \`Previous_{{ timestamp_column }}\`, lag(\`{{ value_column }}\`) OVER (PARTITION BY \`{{ tagname_column }}\` ORDER BY \`{{ timestamp_column }}\`) AS \`Previous_{{ value_column }}\`, lead(\`{{ timestamp_column }}\`) OVER (PARTITION BY \`{{ tagname_column }}\` ORDER BY \`{{ timestamp_column }}\`) AS \`Next_{{ timestamp_column }}\`, lead(\`{{ value_column }}\`) OVER (PARTITION BY \`{{ tagname_column }}\` ORDER BY \`{{ timestamp_column }}\`) AS \`Next_{{ value_column }}\`, 
+        CASE WHEN \`Requested_{{ timestamp_column }}\` = \`Found_{{ timestamp_column }}\` THEN \`{{ value_column }}\` WHEN \`Next_{{ timestamp_column }}\` IS NULL THEN \`Previous_{{ value_column }}\` WHEN \`Previous_{{ timestamp_column }}\` IS NULL AND \`Next_{{ timestamp_column }}\` IS NULL THEN NULL 
+        ELSE \`Previous_{{ value_column }}\` + ((\`Next_{{ value_column }}\` - \`Previous_{{ value_column }}\`) * ((unix_timestamp(\`{{ timestamp_column }}\`) - unix_timestamp(\`Previous_{{ timestamp_column }}\`)) / (unix_timestamp(\`Next_{{ timestamp_column }}\`) - unix_timestamp(\`Previous_{{ timestamp_column }}\`)))) END AS \`Interpolated_{{ value_column }}\` FROM interpolation_events) 
+        ,project AS (SELECT \`{{ tagname_column }}\`, \`{{ timestamp_column }}\`, \`Interpolated_{{ value_column }}\` AS \`{{ value_column }}\` FROM interpolation_calculations WHERE \`{{ timestamp_column }}\` IN ( 
+        {% for timestamp in timestamps -%} 
+        from_utc_timestamp(to_timestamp("{{timestamp}}"), "{{time_zone}}") 
+        {% if not loop.last %} , {% endif %} {% endfor %}) 
+        ) 
+        {% if pivot is defined and pivot == true %}
+        ,pivot AS (SELECT * FROM project PIVOT (FIRST(\`{{ value_column }}\`) FOR \`{{ tagname_column }}\` IN ({{ tag_names | joinWithQuotes }}))) 
+        SELECT * FROM pivot ORDER BY \`{{ timestamp_column }}\` 
+        {% else %}
+        SELECT * FROM project ORDER BY \`{{ tagname_column }}\`, \`{{ timestamp_column }}\` 
+        {% endif %}
+        {% if limit is defined and limit is not none %}
+        LIMIT {{ limit }} 
+        {% endif %}
+        {% if offset is defined and offset is not none %}
+        OFFSET {{ offset }} 
+        {% endif %}
+    `
+
+    const interpolationAtTimeParameters = {
+        "source":               parameters["source"],
+        "source_metadata":      parameters["source_metadata"],
+        "business_unit":        parameters["business_unit"],
+        "region":               parameters["region"],
+        "asset":                parameters["asset"],
+        "data_security_level":  parameters["data_security_level"],
+        "data_type":            parameters["data_type"],
+        "timestamps":           parameters["timestamps"],
+        "time_zone":            parameters["time_zone"],
+        "tag_names":            [...new Set(parameters["tag_names"])],
+        "include_bad_data":     parameters["include_bad_data"],
+        "time_zone":            parameters["time_zone"],
+        "min_timestamp":        parameters["min_timestamp"],
+        "max_timestamp":        parameters["max_timestamp"],
+        "window_length":        parameters["window_length"],
+        "pivot":                parameters["pivot"],
+        "limit":                parameters["limit"],
+        "offset":               parameters["offset"],
+        "tagname_column":       get(parameters, "tagname_column", "TagName"),
+        "timestamp_column":     get(parameters, "timestamp_column", "EventTime"),
+        "include_status":       "status_column" in parameters && parameters["status_column"] ? false : true,
+        "status_column":        "status_column" in parameters && parameters["status_column"] ? "Status" : get(parameters, "status_column", "Status"),
+        "value_column":         get(parameters, "value_column", "Value"),
+    }
+
+    console.log(interpolationAtTimeParameters)
+    return env.renderString(interpolationAtTimeQuery, interpolationAtTimeParameters)
+}
+
+
+
 export function metadata(parameters){
 
     let metadataQuery = `
@@ -432,9 +516,9 @@ function _parse_dates(parameters_dict) {
     }
 
     if(parameters_dict.hasOwnProperty("timestamps")){
-        parsed_timestamp = parameters_dict["timestamps"].map( dt => _parse_date(dt, is_end_date=false, exclude_date_format=true))
-        parameters_dict["timestamps"] = parsed_timestamp
-        sample_dt = parsed_timestamp[0]
+        const parsed_timestamps = parameters_dict["timestamps"].map( dt => _parse_date(dt, false, true))
+        parameters_dict["timestamps"] = parsed_timestamps
+        sample_dt = parsed_timestamps[0]
     }
 
     parameters_dict["time_zone"] = moment(sample_dt).format("Z")
@@ -450,46 +534,38 @@ function _is_date_format(dt, format){
     }     
 }
 
-function _parse_date(dt, is_end_date=false, exclude_date_format=false){
-    let momentDate = moment(dt, TIMESTAMP_FORMAT);
-
-    // Check if dt is a valid moment object
-    if (momentDate.isValid()) {
-        // Check if time is midnight (start of day)
-        if (momentDate.isSame(momentDate.clone().startOf('day'))) {
-            if (momentDate.utcOffset() !== 0) {
-                // Format with date part and timezone if there's timezone information
-                dt = momentDate.format("YYYY-MM-DDZ");
+function _parse_date(dt, is_end_date = false, exclude_date_format = false) {
+    if (dt instanceof Date || moment.isMoment(dt)) {
+        if (moment(dt).format("HH:mm:ss") === "00:00:00") {
+            if (dt.getTimezoneOffset() !== 0) {
+                dt = moment(dt).format("YYYY-MM-DDZ");
             } else {
-                // Extract just the date part
-                dt = momentDate.format("YYYY-MM-DD");
+                dt = moment(dt).format("YYYY-MM-DD");
             }
         } else {
-            // Format with TIMESTAMP_FORMAT if the time isn't midnight
-            dt = momentDate.format(TIMESTAMP_FORMAT);
+            dt = moment(dt).format(TIMESTAMP_FORMAT);
         }
     }
 
-    // Ensure dt is a string
     dt = String(dt);
 
-    if(_is_date_format(dt, "YYYY-MM-DD") && exclude_date_format == false){
-        const _time = is_end_date == true ? "T23:59:59" : "T00:00:00"
-        return dt + _time + "+00:00"
-    } else if (_is_date_format(dt, "YYYY-MM-DDTHH:mm:ss")){
-        return dt + "+00:00"
-    } else if (_is_date_format(dt, TIMESTAMP_FORMAT)){
-        return dt
-    } else if (_is_date_format(dt, "YYYY-MM-DDZ")){
-        const _time = is_end_date == true ? "T23:59:59" : "T00:00:00"
-        dt = dt.slice(0, 10) + _time + dt.slice(10)
-        return dt
+    if (_is_date_format(dt, "YYYY-MM-DD") && !exclude_date_format) {
+        let _time = is_end_date ? "T23:59:59" : "T00:00:00";
+        return dt + _time + "+00:00";
+    } else if (_is_date_format(dt, "YYYY-MM-DDTHH:mm:ss")) {
+        return dt + "+00:00";
+    } else if (_is_date_format(dt, TIMESTAMP_FORMAT)) {
+        return dt;
+    } else if (_is_date_format(dt, "YYYY-MM-DDZ")) {
+        let _time = is_end_date ? "T23:59:59" : "T00:00:00";
+        dt = dt.substring(0, 10) + _time + dt.substring(10);
+        return dt;
     } else {
-        let msg = `Inputted timestamp: '${dt}', is not in the correct format.`
-        if(exclude_date_format == true){
-            msg += " List of timestamps must be in datetime format."
+        let msg = `Inputted timestamp: '${dt}', is not in the correct format.`;
+        if (exclude_date_format) {
+            msg += " List of timestamps must be in datetime format.";
         }
-        throw Error(msg)
+        throw new Error(msg);
     }
 }
 
