@@ -373,6 +373,45 @@ export function interpolate(parameters){
 }
 
 
+export function metadata(parameters){
+
+    let metadataQuery = `
+        SELECT * FROM 
+        {% if source is defined and source is not none %}
+        {{ source|lower }}
+        {% else %}
+        \`{{ business_unit|lower }}\`.\`sensors\`.\`{{ asset|lower }}_{{ data_security_level|lower }}_metadata\` 
+        {% endif %}
+        {% if tag_names is defined and tag_names|length > 0 %} 
+        WHERE \`{{ tagname_column }}\` IN ({{ tag_names | joinWithQuotes }}) 
+        {% endif %}
+        ORDER BY \`{{ tagname_column }}\` 
+        {% if limit is defined and limit is not none %}
+        LIMIT {{ limit }} 
+        {% endif %}
+        {% if offset is defined and offset is not none %}
+        OFFSET {{ offset }} 
+        {% endif %}
+    `
+
+    const metadataParameters = {
+        "source":               parameters["source"],
+        "business_unit":        parameters["business_unit"],
+        "region":               parameters["region"],
+        "asset":                parameters["asset"],
+        "data_security_level":  parameters["data_security_level"],
+        "data_type":            parameters["data_type"],
+        "tag_names":            [...new Set(parameters["tag_names"])],
+        "include_bad_data":     parameters["include_bad_data"],
+        "limit":                parameters["limit"],
+        "offset":               parameters["offset"],
+        "tagname_column":       get(parameters, "tagname_column", "TagName")
+    }
+
+    return env.renderString(metadataQuery, metadataParameters)
+}
+
+
 // utils
 const get = (obj, key, defaultValue=undefined) => {
     return obj.hasOwnProperty(key) ? obj[key] : defaultValue;

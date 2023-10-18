@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "A frontend library to request and process realtime data from databricks tables via the official rest api.",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "test": "npm run test"
   },
