@@ -201,6 +201,80 @@ export function latest(parameters){
 }
 
 
+
+export function resample(parameters){
+
+    parameters = _parse_dates(parameters)
+    parameters["range_join_seconds"] = _convert_to_seconds(
+        parameters["time_interval_rate"]
+        + " "
+        + parameters["time_interval_unit"][0]
+    )
+
+    let resampleQuery = `
+        WITH raw_events AS (SELECT DISTINCT from_utc_timestamp(to_timestamp(date_format(\`{{ timestamp_column }}\`, 'yyyy-MM-dd HH:mm:ss.SSS')), \"{{ time_zone }}\") AS \`{{ timestamp_column }}\`, \`{{ tagname_column }}\`, {% if include_status is defined and include_status == true %} \`{{ status_column }}\`, {% else %} 'Good' AS \`Status\`, {% endif %} \`{{ value_column }}\` FROM 
+        {% if source is defined and source is not none %}
+        {{ source|lower }}
+        {% else %}
+        \`{{ business_unit|lower }}\`.\`sensors\`.\`{{ asset|lower }}_{{ data_security_level|lower }}_events_{{ data_type|lower }}\` 
+        {% endif %}
+        WHERE \`{{ timestamp_column }}\` BETWEEN to_timestamp(\"{{ start_date }}\") AND to_timestamp(\"{{ end_date }}\") AND \`{{ tagname_column }}\` IN ({{ tag_names | joinWithQuotes }}) 
+        {% if include_status is defined and include_status == true and include_bad_data is defined and include_bad_data == false %} AND \`{{ status_column }}\` = 'Good' {% endif %}) 
+        ,date_array AS (SELECT explode(sequence(from_utc_timestamp(to_timestamp("{{ start_date }}"), "{{ time_zone }}"), from_utc_timestamp(to_timestamp("{{ end_date }}"), "{{ time_zone }}"), INTERVAL \'{{ time_interval_rate + \' \' + time_interval_unit }}\')) AS timestamp_array) 
+        ,window_buckets AS (SELECT timestamp_array AS window_start, LEAD(timestamp_array) OVER (ORDER BY timestamp_array) AS window_end FROM date_array) 
+        ,resample AS (SELECT /*+ RANGE_JOIN(d, {{ range_join_seconds }} ) */ d.window_start, d.window_end, e.\`{{ tagname_column }}\`, {{ agg_method }}(e.\`{{ value_column }}\`) OVER (PARTITION BY e.\`{{ tagname_column }}\`, d.window_start ORDER BY e.\`{{ timestamp_column }}\` ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS \`{{ value_column }}\` FROM window_buckets d INNER JOIN raw_events e ON d.window_start <= e.\`{{ timestamp_column }}\` AND d.window_end > e.\`{{ timestamp_column }}\`) 
+        ,project AS (SELECT window_start AS \`{{ timestamp_column }}\`, \`{{ tagname_column }}\`, \`{{ value_column }}\` FROM resample GROUP BY window_start, \`{{ tagname_column }}\`, \`{{ value_column }}\` 
+        {% if is_resample is defined and is_resample == true %}
+        ORDER BY \`{{ tagname_column }}\`, \`{{ timestamp_column }}\` 
+        {% endif %}
+        ) 
+        {% if is_resample is defined and is_resample == true and pivot is defined and pivot == true %}
+        ,pivot AS (SELECT * FROM project PIVOT (FIRST(\`{{ value_column }}\`) FOR \`{{ tagname_column }}\` IN ({{ tag_names | joinWithQuotes }}))) 
+        SELECT * FROM pivot ORDER BY \`{{ timestamp_column }}\` 
+        {% else %}
+        SELECT * FROM project
+        {% endif %}
+        {% if is_resample is defined and is_resample == true and limit is defined and limit is not none %}
+        LIMIT {{ limit }}
+        {% endif %}
+        {% if is_resample is defined and is_resample == true and offset is defined and offset is not none %}
+        OFFSET {{ offset }}
+        {% endif %}
+    `
+
+    const resampleParameters = {
+        "source":               parameters["source"],
+        "source_metadata":      parameters["source_metadata"],
+        "business_unit":        parameters["business_unit"],
+        "region":               parameters["region"],
+        "asset":                parameters["asset"],
+        "data_security_level":  parameters["data_security_level"],
+        "data_type":            parameters["data_type"],
+        "start_date":           parameters["start_date"],
+        "end_date":             parameters["end_date"],
+        "tag_names":            [...new Set(parameters["tag_names"])],
+        "include_bad_data":     parameters["include_bad_data"],
+        "time_interval_rate":   parameters["time_interval_rate"],
+        "time_interval_unit":   parameters["time_interval_unit"],
+        "agg_method":           parameters["agg_method"],
+        "time_zone":            parameters["time_zone"],
+        "pivot":                parameters["pivot"],
+        "limit":                parameters["limit"],
+        "offset":               parameters["offset"],
+        "is_resample":          true,
+        "tagname_column":       get(parameters, "tagname_column", "TagName"),
+        "timestamp_column":     get(parameters, "timestamp_column", "EventTime"),
+        "include_status":       "status_column" in parameters && parameters["status_column"] ? false : true,
+        "status_column":        "status_column" in parameters && parameters["status_column"] ? "Status" : get(parameters, "status_column", "Status"),
+        "value_column":         get(parameters, "value_column", "Value"),
+        "range_join_seconds":   parameters["range_join_seconds"]
+    }
+
+    return env.renderString(resampleQuery, resampleParameters)
+}
+
+
+
 // utils
 const get = (obj, key, defaultValue=undefined) => {
     return obj.hasOwnProperty(key) ? obj[key] : defaultValue;
