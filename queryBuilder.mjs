@@ -495,6 +495,107 @@ export function metadata(parameters){
     return env.renderString(metadataQuery, metadataParameters)
 }
 
+export function circularAverage(parameters){
+    parameters["circular_function"] = "average"
+    return circularStatsQuery(parameters)
+}
+
+export function circularStdev(parameters){
+    parameters["circular_function"] = "standard_deviation"
+    return circularStatsQuery(parameters)
+}
+
+
+function circularStatsQuery(parameters){
+
+    // parse datees
+    parameters = _parse_dates(parameters)
+
+    const circularBaseQuery = `
+        WITH raw_events AS (SELECT \`{{ timestamp_column }}\`, \`{{ tagname_column }}\`, {% if include_status is defined and include_status == true %} \`{{ status_column }}\`, {% else %} 'Good' AS \`Status\`, {% endif %} \`{{ value_column }}\` FROM 
+        {% if source is defined and source is not none %}
+        {{ source|lower }} 
+        {% else %}
+        \`{{ business_unit|lower }}\`.\`sensors\`.\`{{ asset|lower }}_{{ data_security_level|lower }}_events_{{ data_type|lower }}\` 
+        {% endif %}
+        WHERE \`{{ timestamp_column }}\` BETWEEN TO_TIMESTAMP(\"{{ start_date }}\") AND TO_TIMESTAMP(\"{{ end_date }}\") AND \`{{ tagname_column }}\` IN ({{ tag_names | joinWithQuotes }}) 
+        {% if include_status is defined and include_status == true and include_bad_data is defined and include_bad_data == false %} AND \`{{ status_column }}\` = 'Good' {% endif %}) 
+        ,date_array AS (SELECT EXPLODE(SEQUENCE(FROM_UTC_TIMESTAMP(TO_TIMESTAMP(\"{{ start_date }}\"), \"{{ time_zone }}\"), FROM_UTC_TIMESTAMP(TO_TIMESTAMP(\"{{ end_date }}\"), \"{{ time_zone }}\"), INTERVAL '{{ time_interval_rate + ' ' + time_interval_unit }}')) AS \`{{ timestamp_column }}\`, EXPLODE(ARRAY('{{ tag_names | joinWithQuotes }}')) AS \`{{ tagname_column }}\`)  
+        ,window_events AS (SELECT COALESCE(a.\`{{ tagname_column }}\`, b.\`{{ tagname_column }}\`) AS \`{{ tagname_column }}\`, COALESCE(a.\`{{ timestamp_column }}\`, b.\`{{ timestamp_column }}\`) AS \`{{ timestamp_column }}\`, WINDOW(COALESCE(a.\`{{ timestamp_column }}\`, b.\`{{ timestamp_column }}\`), '{{ time_interval_rate + ' ' + time_interval_unit }}').START \`Window{{ timestamp_column }}\`, b.\`{{ status_column }}\`, b.\`{{ value_column }}\` FROM date_array a FULL OUTER JOIN raw_events b ON CAST(a.\`{{ timestamp_column }}\` AS LONG) = CAST(b.\`{{ timestamp_column }}\` AS LONG) AND a.\`{{ tagname_column }}\` = b.\`{{ tagname_column }}\`) 
+        ,calculation_set_up AS (SELECT \`{{ timestamp_column }}\`, \`Window{{ timestamp_column }}\`, \`{{ tagname_column }}\`, \`{{ value_column }}\`, MOD(\`{{ value_column }}\` - {{ lower_bound }}, ({{ upper_bound }} - {{ lower_bound }}))*(2*pi()/({{ upper_bound }} - {{ lower_bound }})) AS \`{{ value_column }}_in_Radians\`, LAG(\`{{ timestamp_column }}\`) OVER (PARTITION BY \`{{ tagname_column }}\` ORDER BY \`{{ timestamp_column }}\`) AS \`Previous_{{ timestamp_column }}\`, (unix_millis(\`{{ timestamp_column }}\`) - unix_millis(\`Previous_{{ timestamp_column }}\`)) / 86400000 AS Time_Difference, COS(\`{{ value_column }}_in_Radians\`) AS Cos_Value, SIN(\`{{ value_column }}_in_Radians\`) AS Sin_Value FROM window_events) 
+        ,circular_average_calculations AS (SELECT \`Window{{ timestamp_column }}\`, \`{{ tagname_column }}\`, Time_Difference, AVG(Cos_Value) OVER (PARTITION BY \`{{ tagname_column }}\` ORDER BY \`{{ timestamp_column }}\` ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS Average_Cos, AVG(Sin_Value) OVER (PARTITION BY \`{{ tagname_column }}\` ORDER BY \`{{ timestamp_column }}\` ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS Average_Sin, SQRT(POW(Average_Cos, 2) + POW(Average_Sin, 2)) AS Vector_Length, Average_Cos/Vector_Length AS Rescaled_Average_Cos, Average_Sin/Vector_Length AS Rescaled_Average_Sin, Time_Difference * Rescaled_Average_Cos AS Diff_Average_Cos, Time_Difference * Rescaled_Average_Sin AS Diff_Average_Sin FROM calculation_set_up) 
+    `
+    let circularStatsQuery = ""
+    if(parameters["circular_function"] == "average"){
+        circularStatsQuery = `
+            ${circularBaseQuery}
+            ,circular_average_results AS (SELECT \`Window{{ timestamp_column }}\` AS \`{{ timestamp_column }}\`, \`{{ tagname_column }}\`, sum(Diff_Average_Cos)/sum(Time_Difference) AS Cos_Time_Averages, sum(Diff_Average_Sin)/sum(Time_Difference) AS Sin_Time_Averages, array_min(array(1, sqrt(pow(Cos_Time_Averages, 2) + pow(Sin_Time_Averages, 2)))) AS R, mod(2*pi() + atan2(Sin_Time_Averages, Cos_Time_Averages), 2*pi()) AS Circular_Average_Value_in_Radians, (Circular_Average_Value_in_Radians * ({{ upper_bound }} - {{ lower_bound }})) / (2*pi())+ 0 AS Circular_Average_Value_in_Degrees FROM circular_average_calculations GROUP BY \`{{ tagname_column }}\`, \`Window{{ timestamp_column }}\`) 
+            ,project AS (SELECT \`{{ timestamp_column }}\`, \`{{ tagname_column }}\`, Circular_Average_Value_in_Degrees AS \`{{ value_column }}\` FROM circular_average_results) 
+            {% if pivot is defined and pivot == true %}
+            ,pivot AS (SELECT * FROM project PIVOT (FIRST(\`{{ value_column }}\`) FOR \`{{ tagname_column }}\` IN ({{ tag_names | joinWithQuotes }}))) 
+            SELECT * FROM pivot ORDER BY \`{{ timestamp_column }}\` 
+            {% else %}
+            SELECT * FROM project ORDER BY \`{{ tagname_column }}\`, \`{{ timestamp_column }}\` 
+            {% endif %}
+            {% if limit is defined and limit is not none %}
+            LIMIT {{ limit }} 
+            {% endif %}
+            {% if offset is defined and offset is not none %}
+            OFFSET {{ offset }} 
+            {% endif %}
+        `
+    } else if(parameters["circular_function"] == "standard_deviation"){
+        circularStatsQuery = `
+            ${circularBaseQuery} 
+            ,circular_average_results AS (SELECT \`Window{{ timestamp_column }}\` AS \`{{ timestamp_column }}\`, \`{{ tagname_column }}\`, sum(Diff_Average_Cos)/sum(Time_Difference) AS Cos_Time_Averages, sum(Diff_Average_Sin)/sum(Time_Difference) AS Sin_Time_Averages, array_min(array(1, sqrt(pow(Cos_Time_Averages, 2) + pow(Sin_Time_Averages, 2)))) AS R, mod(2*pi() + atan2(Sin_Time_Averages, Cos_Time_Averages), 2*pi()) AS Circular_Average_Value_in_Radians, SQRT(-2*LN(R)) * ( {{ upper_bound }} - {{ lower_bound }}) / (2*PI()) AS Circular_Standard_Deviation FROM circular_average_calculations GROUP BY \`{{ tagname_column }}\`, \`Window{{ timestamp_column }}\`) 
+            ,project AS (SELECT \`{{ timestamp_column }}\`, \`{{ tagname_column }}\`, Circular_Standard_Deviation AS \`Value\` FROM circular_average_results) 
+            {% if pivot is defined and pivot == true %}
+            ,pivot AS (SELECT * FROM project PIVOT (FIRST(\`{{ value_column }}\`) FOR \`{{ tagname_column }}\` IN ({{ tag_names | joinWithQuotes }}))) 
+            SELECT * FROM pivot ORDER BY \`{{ timestamp_column }}\` 
+            {% else %}
+            SELECT * FROM project ORDER BY \`{{ tagname_column }}\`, \`{{ timestamp_column }}\` 
+            {% endif %}
+            {% if limit is defined and limit is not none %}
+            LIMIT {{ limit }} 
+            {% endif %}
+            {% if offset is defined and offset is not none %}
+            OFFSET {{ offset }} 
+            {% endif %}
+        `
+    }
+
+    const circularStatsParameters = {
+        "source":               parameters["source"],
+        "source_metadata":      parameters["source_metadata"],
+        "business_unit":        parameters["business_unit"],
+        "region":               parameters["region"],
+        "asset":                parameters["asset"],
+        "data_security_level":  parameters["data_security_level"],
+        "data_type":            parameters["data_type"],
+        "start_date":           parameters["start_date"],
+        "end_date":             parameters["end_date"],
+        "tag_names":            [...new Set(parameters["tag_names"])],
+        "time_interval_rate":   parameters["time_interval_rate"],
+        "time_interval_unit":   parameters["time_interval_unit"],
+        "lower_bound":          parameters["lower_bound"],
+        "upper_bound":          parameters["upper_bound"],
+        "include_bad_data":     parameters["include_bad_data"],
+        "time_zone":            parameters["time_zone"],
+        "circular_function":    parameters["circular_function"],        
+        "pivot":                parameters["pivot"],
+        "limit":                parameters["limit"],
+        "offset":               parameters["offset"],
+        "is_resample":          true,
+        "tagname_column":       get(parameters, "tagname_column", "TagName"),
+        "timestamp_column":     get(parameters, "timestamp_column", "EventTime"),
+        "include_status":       "status_column" in parameters && parameters["status_column"] ? false : true,
+        "status_column":        "status_column" in parameters && parameters["status_column"] ? "Status" : get(parameters, "status_column", "Status"),
+        "value_column":         get(parameters, "value_column", "Value"),
+    }
+
+    return env.renderString(circularStatsQuery, circularStatsParameters)
+}
+
 
 // utils
 const get = (obj, key, defaultValue=undefined) => {
