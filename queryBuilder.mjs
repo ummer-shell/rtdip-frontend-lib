@@ -635,6 +635,11 @@ function _is_date_format(dt, format){
     }     
 }
 
+function _is_star_format(dt){
+    const pattern = /^\*([+-]\d+[smhdw])?$/;
+    return pattern.test(dt);
+}
+
 function _parse_date(dt, is_end_date = false, exclude_date_format = false) {
     if (dt instanceof Date || moment.isMoment(dt)) {
         if (moment(dt).format("HH:mm:ss") === "00:00:00") {
@@ -661,6 +666,8 @@ function _parse_date(dt, is_end_date = false, exclude_date_format = false) {
         let _time = is_end_date ? "T23:59:59" : "T00:00:00";
         dt = dt.substring(0, 10) + _time + dt.substring(10);
         return dt;
+    } else if (_is_star_format(dt)){
+        return parseStarFormat(dt)
     } else {
         let msg = `Inputted timestamp: '${dt}', is not in the correct format.`;
         if (exclude_date_format) {
@@ -676,4 +683,26 @@ function _convert_to_seconds(s){
     let value = parseInt(s.substring(0, s.length - 1), 10);
 
     return value * seconds_per_unit[unit];
+}
+
+function parseStarFormat(dt){
+    // parses strings into moment dates that match the pattern  /^\*([+-]\d+[smhdw])?$/;
+
+    // Initialize the date to now
+    let date = moment();
+    
+    // If the input string is more than just "*", parse the offset
+    if (dt.length > 1) {
+        const operator = dt[1]; // "+" or "-"
+        const amount = parseInt(dt.substring(2, dt.length - 1), 10); // Extract the amount as an integer
+        const unit = dt[dt.length - 1]; // Extract the unit (s, m, h, or d)
+        
+        if (operator === '+') {
+            date.add(amount, unit);
+        } else if (operator === '-') {
+            date.subtract(amount, unit);
+        }
+    }
+    
+    return date.format(TIMESTAMP_FORMAT);
 }
